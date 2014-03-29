@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -57,24 +58,6 @@ type lexer struct {
 	items chan item // items over the fence
 }
 
-// return new scanner
-func NewScanner(name, input string) *lexer {
-	return &lexer{
-		name:  name,
-		input: input,
-		state: lexText,
-		items: make(chan item, 2), // might not be needed here, but no reason to let memory go above what's needed
-	}
-}
-
-// state machine
-func (l *lexer) run() {
-	for state := lexText; state != nil; {
-		state = state(l)
-	}
-	close(l.items)
-}
-
 // emit throws items over the fence (to client)
 func (l *lexer) emit(t itemType) {
 	l.items <- item{t, l.input[l.start:l.pos]}
@@ -115,7 +98,7 @@ func lexText(l *lexer) stateFn {
 	return nil
 }
 
-// leftMeta
+// metas
 func lexLeftMeta(l *lexer) stateFn {
 	l.pos += len(leftMeta)
 	l.emit(itemLeftMeta)
@@ -123,6 +106,13 @@ func lexLeftMeta(l *lexer) stateFn {
 	return lexInsideBlock
 }
 
+func lexRightMeta(l *lexer) stateFn {
+	l.pos += len(rightMeta)
+	l.emit(itemRightMeta)
+	return lexText
+}
+
+// block
 func lexInsideBlock(l *lexer) stateFn {
 	// scan until }} is found
 	for {
@@ -144,37 +134,17 @@ func lexInsideBlock(l *lexer) stateFn {
 	}
 }
 
-func lexRightMeta(l *lexer) stateFn {
-	l.pos += len(rightMeta)
-	l.emit(itemRightMeta)
-	return lexText
+// numbers
+const digits = "0123456789"
+
+func lexNumber(l *lexer) stateFn {
+	l.accept("+-")
+	l.acceptRun(digits)
+	l.emit(itemNumber)
+	return lexInsideBlock
 }
 
-func (l *lexer) next() (r rune) {
-	// check if end has been reached
-	if l.pos >= len(l.input) {
-		l.width = 0 // QUESTION: to not break backup?
-		return eof
-	}
-	// read next rune
-	r, l.width = utf8.DecodeRuneInString(l.input[l.pos:])
-	l.pos += l.width
-	return r
-}
-
-func (l *lexer) nextItem() item {
-	for {
-		select {
-		case i := <-l.items:
-			return i
-		default:
-			l.state = l.state(l)
-		}
-	}
-	// we've escaped the state functions
-	panic("no state function, but still in state machine")
-}
-
+// helpers
 func (l *lexer) ignore() {
 	l.start = l.pos
 }
@@ -208,15 +178,6 @@ func (l *lexer) acceptRun(valid string) {
 	l.backup()
 }
 
-const digits = "0123456789"
-
-func lexNumber(l *lexer) stateFn {
-	l.accept("+-")
-	l.acceptRun(digits)
-	l.emit(itemNumber)
-	return lexInsideBlock
-}
-
 func (l *lexer) errorf(format string, args ...interface{}) stateFn {
 	// throw error over the fence
 	l.items <- item{
@@ -227,10 +188,48 @@ func (l *lexer) errorf(format string, args ...interface{}) stateFn {
 	return nil
 }
 
+// API for traversing and/or parsing
+
+// return new scanner
+func NewScanner(name, input string) *lexer {
+	return &lexer{
+		name:  name,
+		input: input,
+		state: lexText,
+		items: make(chan item, 2), // might not be needed here, but no reason to let memory go above what's needed
+	}
+}
+func (l *lexer) next() (r rune) {
+	// check if end has been reached
+	if l.pos >= len(l.input) {
+		l.width = 0 // QUESTION: to not break backup?
+		return eof
+	}
+	// read next rune
+	r, l.width = utf8.DecodeRuneInString(l.input[l.pos:])
+	l.pos += l.width
+	return r
+}
+
+// state machine
+func (l *lexer) nextItem() item {
+	for {
+		select {
+		case i := <-l.items:
+			return i
+		default:
+			l.state = l.state(l)
+		}
+	}
+	// we've escaped the state functions
+	panic("no state function, but still in state machine")
+}
+
 func main() {
-	input := "lex & klatten {{ 25 }}"
+	flag.Parse()
+	input := flag.Arg(0)
 	fmt.Printf("lexing %.100q...\n", input)
-	s := NewScanner("test", input)
+	s := NewScanner("number lexer", input)
 	for {
 		if i := s.nextItem(); i.typ != itemEOF {
 			fmt.Println(i)
